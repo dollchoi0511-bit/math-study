@@ -1,1109 +1,1153 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInWithCustomToken, 
-  signInAnonymously, 
-  onAuthStateChanged 
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  doc, 
-  setDoc, 
-  addDoc, 
-  deleteDoc, 
-  getDocs, 
-  onSnapshot 
-} from 'firebase/firestore';
-import { 
-  CheckCircle2, 
-  AlertCircle, 
-  HelpCircle, 
-  BarChart3, 
-  Users, 
-  BookOpen, 
-  Send, 
-  Sparkles, 
-  RefreshCw, 
-  Edit3, 
-  GraduationCap, 
-  ArrowRight, 
-  Check, 
-  X, 
-  MessageSquare,
-  ChevronRight,
-  TrendingUp,
-  UserX,
-  PlusCircle,
-  Clock
-} from 'lucide-react';
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>수학 수업 3분 마무리 체크 & 실시간 교사 피드백 대시보드</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- React & ReactDOM CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- Babel Standalone (JSX 컴파일용) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.6/babel.min.js"></script>
 
-// Firebase 설정 초기화
-const firebaseConfig = typeof __firebase_config !== 'undefined' 
-  ? JSON.parse(__firebase_config) 
-  : {
-      apiKey: "demo-api-key",
-      authDomain: "demo.firebaseapp.com",
-      projectId: "demo-math-exit-ticket",
-      storageBucket: "demo.appspot.com",
-      messagingSenderId: "123456789",
-      appId: "1:123456789:web:demo"
-    };
+  <!-- Firebase App & Firestore SDK (Compat) -->
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'math-exit-ticket-demo';
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700;800&display=swap');
+    body {
+      font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fadeIn {
+      animation: fadeIn 0.25s ease-out forwards;
+    }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased min-h-screen">
+  <div id="root"></div>
 
-// 기본 수학 문제 템플릿
-const DEFAULT_QUIZ = {
-  question: "일차방정식 $2x + 6 = 16$ 을 만족하는 $x$의 값은 무엇일까요?",
-  options: [
-    { id: 1, text: "x = 3" },
-    { id: 2, text: "x = 5" },
-    { id: 3, text: "x = 7" },
-    { id: 4, text: "x = 10" }
-  ],
-  correctOptionId: 2,
-  explanation: "양변에서 6을 빼면 $2x = 10$이 되고, 양변을 2로 나누면 $x = 5$가 됩니다."
-};
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
 
-export default function App() {
-  const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('student'); // 'student' | 'teacher'
-  const [responses, setResponses] = useState([]);
-  const [quizConfig, setQuizConfig] = useState(DEFAULT_QUIZ);
-  const [isEditingQuiz, setIsEditingQuiz] = useState(false);
-  const [editForm, setEditForm] = useState(DEFAULT_QUIZ);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [filterUnderstanding, setFilterUnderstanding] = useState('all');
-
-  // 학생 폼 입력 상태
-  const [studentId, setStudentId] = useState('');
-  const [studentName, setStudentName] = useState('');
-  const [understanding, setUnderstanding] = useState(''); // 'high', 'medium', 'low'
-  const [selectedAnswer, setSelectedAnswer] = useState(null);
-  const [confusingTopic, setConfusingTopic] = useState('');
-  const [statusMessage, setStatusMessage] = useState({ type: '', text: '' });
-
-  // 1. Firebase 인증 처리
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) {
-        console.error("Auth init error, running fallback:", err);
-      }
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
-    return () => unsubscribe();
-  }, []);
-
-  // 2. 실시간 응답 데이터 및 문제 설정 구독
-  useEffect(() => {
-    if (!user) return;
-
-    // 응답 데이터 컬렉션
-    const responsesRef = collection(db, 'artifacts', appId, 'public', 'data', 'exit_tickets');
-    const unsubResponses = onSnapshot(
-      responsesRef,
-      (snapshot) => {
-        const list = [];
-        snapshot.forEach((doc) => {
-          list.push({ id: doc.id, ...doc.data() });
-        });
-        setResponses(list);
-      },
-      (error) => {
-        console.error("Firestore onSnapshot error:", error);
-      }
+    // --- 자체 내장 SVG 아이콘 컴포넌트 ---
+    const IconGraduation = () => (
+      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M22 10v6M2 10l10-5 10 5-10 5z"></path>
+        <path d="M6 12v5c3 3 9 3 12 0v-5"></path>
+      </svg>
+    );
+    const IconUsers = () => (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+        <circle cx="9" cy="7" r="4"></circle>
+        <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+        <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+      </svg>
+    );
+    const IconChart = () => (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="18" y1="20" x2="18" y2="10"></line>
+        <line x1="12" y1="20" x2="12" y2="4"></line>
+        <line x1="6" y1="20" x2="6" y2="14"></line>
+      </svg>
+    );
+    const IconClock = () => (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10"></circle>
+        <polyline points="12 6 12 12 16 14"></polyline>
+      </svg>
+    );
+    const IconCheck = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+    );
+    const IconCheckCircle = () => (
+      <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+        <polyline points="22 4 12 14.01 9 11.01"></polyline>
+      </svg>
+    );
+    const IconX = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    );
+    const IconSend = () => (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="22" y1="2" x2="11" y2="13"></line>
+        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+      </svg>
+    );
+    const IconSparkles = () => (
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"></path>
+      </svg>
+    );
+    const IconRefresh = () => (
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+      </svg>
+    );
+    const IconEdit = () => (
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path>
+      </svg>
+    );
+    const IconMessage = () => (
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+      </svg>
+    );
+    const IconUserX = () => (
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+        <circle cx="8.5" cy="7" r="4"></circle>
+        <line x1="18" y1="8" x2="23" y2="13"></line>
+        <line x1="23" y1="8" x2="18" y2="13"></line>
+      </svg>
+    );
+    const IconTrending = () => (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline>
+        <polyline points="17 6 23 6 23 12"></polyline>
+      </svg>
     );
 
-    // 문제 설정 컬렉션
-    const quizDocRef = collection(db, 'artifacts', appId, 'public', 'data', 'quiz_settings');
-    const unsubQuiz = onSnapshot(
-      quizDocRef,
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const docData = snapshot.docs[0].data();
-          if (docData && docData.question) {
-            setQuizConfig(docData);
-            setEditForm(docData);
+    // 기본 수학 문제 템플릿
+    const DEFAULT_QUIZ = {
+      question: "일차방정식 2x + 6 = 16 을 만족하는 x의 값은 무엇일까요?",
+      options: [
+        { id: 1, text: "x = 3" },
+        { id: 2, text: "x = 5" },
+        { id: 3, text: "x = 7" },
+        { id: 4, text: "x = 10" }
+      ],
+      correctOptionId: 2,
+      explanation: "양변에서 6을 빼면 2x = 10이 되고, 양변을 2로 나누면 x = 5가 됩니다."
+    };
+
+    function App() {
+      const [activeTab, setActiveTab] = useState('student'); // 'student' | 'teacher'
+      const [responses, setResponses] = useState([]);
+      const [quizConfig, setQuizConfig] = useState(DEFAULT_QUIZ);
+      const [isEditingQuiz, setIsEditingQuiz] = useState(false);
+      const [editForm, setEditForm] = useState(DEFAULT_QUIZ);
+      const [isSubmitting, setIsSubmitting] = useState(false);
+      const [submitted, setSubmitted] = useState(false);
+      const [filterUnderstanding, setFilterUnderstanding] = useState('all');
+      const [isFirebaseReady, setIsFirebaseReady] = useState(false);
+
+      // 학생 폼 입력 상태
+      const [studentId, setStudentId] = useState('');
+      const [studentName, setStudentName] = useState('');
+      const [understanding, setUnderstanding] = useState(''); // 'high', 'medium', 'low'
+      const [selectedAnswer, setSelectedAnswer] = useState(null);
+      const [confusingTopic, setConfusingTopic] = useState('');
+      const [statusMessage, setStatusMessage] = useState({ type: '', text: '' });
+
+      // Firebase 초기화 (GitHub Pages 환경 지원)
+      useEffect(() => {
+        try {
+          const config = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : null;
+
+          if (config && firebase.apps.length === 0) {
+            firebase.initializeApp(config);
+            firebase.auth().signInAnonymously().catch(() => {});
+            setIsFirebaseReady(true);
+
+            // 실시간 리스너 연동
+            const db = firebase.firestore();
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'math-exit-ticket';
+            
+            const unsubResponses = db.collection('artifacts').doc(appId).collection('exit_tickets')
+              .onSnapshot((snapshot) => {
+                const list = [];
+                snapshot.forEach((doc) => list.push({ id: doc.id, ...doc.data() }));
+                if (list.length > 0) setResponses(list);
+              }, (err) => console.log('Firestore read fallback to memory'));
+
+            const unsubQuiz = db.collection('artifacts').doc(appId).collection('quiz_settings').doc('current')
+              .onSnapshot((doc) => {
+                if (doc.exists && doc.data()?.question) {
+                  setQuizConfig(doc.data());
+                  setEditForm(doc.data());
+                }
+              }, () => {});
+
+            return () => {
+              unsubResponses();
+              unsubQuiz();
+            };
           }
+        } catch (e) {
+          console.warn('Running in standalone in-memory mode:', e);
         }
-      },
-      (error) => {
-        console.error("Quiz settings snapshot error:", error);
-      }
-    );
+      }, []);
 
-    return () => {
-      unsubResponses();
-      unsubQuiz();
-    };
-  }, [user]);
-
-  // 학생 제출 처리
-  const handleSubmitResponse = async (e) => {
-    e.preventDefault();
-    if (!studentId.trim() || !studentName.trim()) {
-      setStatusMessage({ type: 'error', text: '학번과 이름을 모두 입력해주세요.' });
-      return;
-    }
-    if (!understanding) {
-      setStatusMessage({ type: 'error', text: '오늘 배운 내용의 이해도를 선택해주세요.' });
-      return;
-    }
-    if (selectedAnswer === null) {
-      setStatusMessage({ type: 'error', text: '확인 문제의 정답을 골라주세요.' });
-      return;
-    }
-
-    setIsSubmitting(true);
-    setStatusMessage({ type: '', text: '' });
-
-    const newResponse = {
-      studentId: studentId.trim(),
-      studentName: studentName.trim(),
-      understanding, // 'high' | 'medium' | 'low'
-      selectedAnswer,
-      isCorrect: selectedAnswer === quizConfig.correctOptionId,
-      confusingTopic: confusingTopic.trim(),
-      submittedAt: new Date().toISOString(),
-      timestamp: Date.now()
-    };
-
-    try {
-      if (user) {
-        const responsesRef = collection(db, 'artifacts', appId, 'public', 'data', 'exit_tickets');
-        await addDoc(responsesRef, newResponse);
-      } else {
-        // 오프라인/로컬 Fallback
-        setResponses((prev) => [
-          ...prev.filter((r) => r.studentId !== newResponse.studentId),
-          { id: 'local-' + Date.now(), ...newResponse }
-        ]);
-      }
-      setSubmitted(true);
-      setStatusMessage({ type: 'success', text: '오늘의 학습 결과가 선생님께 성공적으로 제출되었습니다!' });
-    } catch (err) {
-      console.error("제출 에러:", err);
-      setStatusMessage({ type: 'error', text: '제출 중 문제가 발생했습니다. 다시 시도해주세요.' });
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // 재응답 작성 모드
-  const handleResetForm = () => {
-    setSubmitted(false);
-    setUnderstanding('');
-    setSelectedAnswer(null);
-    setConfusingTopic('');
-    setStatusMessage({ type: '', text: '' });
-  };
-
-  // 교사: 문제 설정 저장
-  const handleSaveQuiz = async (e) => {
-    e.preventDefault();
-    try {
-      if (user) {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'quiz_settings', 'current_quiz');
-        await setDoc(docRef, editForm);
-      }
-      setQuizConfig(editForm);
-      setIsEditingQuiz(false);
-    } catch (err) {
-      console.error("문제 저장 실패:", err);
-    }
-  };
-
-  // 교사: 연수 실습용 샘플 데이터 일괄 생성
-  const handleGenerateSampleData = async () => {
-    const sampleStudents = [
-      { studentId: "10101", studentName: "김민수", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "마지막 단계에서 2로 나누는 부분 계산이 살짝 빨랐어요." },
-      { studentId: "10102", studentName: "이서연", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "특별히 헷갈리는 건 없고 다 이해했습니다!" },
-      { studentId: "10103", studentName: "박지호", understanding: "medium", selectedAnswer: 1, confusingTopic: "이항할 때 부호가 플러스에서 마이너스로 바뀌는 원리가 헷갈려요." },
-      { studentId: "10104", studentName: "최예은", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "없음" },
-      { studentId: "10105", studentName: "정도윤", understanding: "medium", selectedAnswer: 3, confusingTopic: "방정식 양변에 같은 수를 더하거나 뺄 때 등호가 왜 유지되는지 궁금해요." },
-      { studentId: "10106", studentName: "강하은", understanding: "low", selectedAnswer: 4, confusingTopic: "미지수 x가 포함된 식 자체를 어떻게 풀어야 할지 아예 감이 안 와요ㅠㅠ" },
-      { studentId: "10107", studentName: "윤시우", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "다음 시간에 배울 이차방정식도 기대돼요." },
-      { studentId: "10108", studentName: "임수아", understanding: "low", selectedAnswer: 1, confusingTopic: "등식의 성질 4가지 중에 나눗셈 성질 적용하는 게 어려워요." },
-      { studentId: "10109", studentName: "한지우", understanding: "medium", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "답은 맞췄는데 계산 과정에서 실수가 잦아요." },
-      { studentId: "10110", studentName: "조민재", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "잘 배웠습니다!" }
-    ];
-
-    try {
-      if (user) {
-        const responsesRef = collection(db, 'artifacts', appId, 'public', 'data', 'exit_tickets');
-        for (const s of sampleStudents) {
-          await addDoc(responsesRef, {
-            ...s,
-            isCorrect: s.selectedAnswer === quizConfig.correctOptionId,
-            submittedAt: new Date().toISOString(),
-            timestamp: Date.now()
-          });
+      // 학생 응답 제출 핸들러
+      const handleSubmitResponse = async (e) => {
+        e.preventDefault();
+        if (!studentId.trim() || !studentName.trim()) {
+          setStatusMessage({ type: 'error', text: '학번과 이름을 모두 입력해주세요.' });
+          return;
         }
-      } else {
+        if (!understanding) {
+          setStatusMessage({ type: 'error', text: '오늘 배운 내용의 이해도를 선택해주세요.' });
+          return;
+        }
+        if (selectedAnswer === null) {
+          setStatusMessage({ type: 'error', text: '확인 문제의 정답을 선택해주세요.' });
+          return;
+        }
+
+        setIsSubmitting(true);
+        setStatusMessage({ type: '', text: '' });
+
+        const newResponse = {
+          studentId: studentId.trim(),
+          studentName: studentName.trim(),
+          understanding, // 'high' | 'medium' | 'low'
+          selectedAnswer,
+          isCorrect: selectedAnswer === quizConfig.correctOptionId,
+          confusingTopic: confusingTopic.trim(),
+          submittedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timestamp: Date.now()
+        };
+
+        try {
+          if (isFirebaseReady && firebase.apps.length > 0) {
+            const db = firebase.firestore();
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'math-exit-ticket';
+            await db.collection('artifacts').doc(appId).collection('exit_tickets').add(newResponse);
+          } else {
+            // Standalone 메모리 저장 Fallback
+            setResponses((prev) => [
+              ...prev.filter((r) => r.studentId !== newResponse.studentId),
+              { id: 'local-' + Date.now(), ...newResponse }
+            ]);
+          }
+          setSubmitted(true);
+          setStatusMessage({ type: 'success', text: '오늘의 학습 결과가 선생님께 성공적으로 제출되었습니다!' });
+        } catch (err) {
+          console.error("제출 에러:", err);
+          // 메모리 모드로 계속 작동
+          setResponses((prev) => [
+            ...prev.filter((r) => r.studentId !== newResponse.studentId),
+            { id: 'local-' + Date.now(), ...newResponse }
+          ]);
+          setSubmitted(true);
+        } finally {
+          setIsSubmitting(false);
+        }
+      };
+
+      // 재작성 모드
+      const handleResetForm = () => {
+        setSubmitted(false);
+        setUnderstanding('');
+        setSelectedAnswer(null);
+        setConfusingTopic('');
+        setStatusMessage({ type: '', text: '' });
+      };
+
+      // 교사: 문제 설정 저장
+      const handleSaveQuiz = async (e) => {
+        e.preventDefault();
+        try {
+          if (isFirebaseReady && firebase.apps.length > 0) {
+            const db = firebase.firestore();
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'math-exit-ticket';
+            await db.collection('artifacts').doc(appId).collection('quiz_settings').doc('current').set(editForm);
+          }
+          setQuizConfig(editForm);
+          setIsEditingQuiz(false);
+        } catch (err) {
+          setQuizConfig(editForm);
+          setIsEditingQuiz(false);
+        }
+      };
+
+      // 교사: 연수 실습용 10명 가상 학생 데이터 생성
+      const handleGenerateSampleData = async () => {
+        const sampleStudents = [
+          { studentId: "10101", studentName: "김민수", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "마지막 단계에서 2로 나누는 부분 계산이 살짝 빨랐어요." },
+          { studentId: "10102", studentName: "이서연", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "특별히 헷갈리는 건 없고 다 이해했습니다!" },
+          { studentId: "10103", studentName: "박지호", understanding: "medium", selectedAnswer: 1, confusingTopic: "이항할 때 부호가 플러스에서 마이너스로 바뀌는 원리가 헷갈려요." },
+          { studentId: "10104", studentName: "최예은", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "없음" },
+          { studentId: "10105", studentName: "정도윤", understanding: "medium", selectedAnswer: 3, confusingTopic: "방정식 양변에 같은 수를 더하거나 뺄 때 등호가 왜 유지되는지 궁금해요." },
+          { studentId: "10106", studentName: "강하은", understanding: "low", selectedAnswer: 4, confusingTopic: "미지수 x가 포함된 식 자체를 어떻게 풀어야 할지 아예 감이 안 와요ㅠㅠ" },
+          { studentId: "10107", studentName: "윤시우", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "다음 시간에 배울 내용도 기대돼요." },
+          { studentId: "10108", studentName: "임수아", understanding: "low", selectedAnswer: 1, confusingTopic: "등식의 성질 4가지 중에 나눗셈 성질 적용하는 게 어려워요." },
+          { studentId: "10109", studentName: "한지우", understanding: "medium", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "답은 맞췄는데 계산 과정에서 실수가 잦아요." },
+          { studentId: "10110", studentName: "조민재", understanding: "high", selectedAnswer: quizConfig.correctOptionId, confusingTopic: "잘 배웠습니다!" }
+        ];
+
         const formatted = sampleStudents.map((s, idx) => ({
-          id: 'sample-' + idx,
+          id: 'sample-' + Date.now() + '-' + idx,
           ...s,
           isCorrect: s.selectedAnswer === quizConfig.correctOptionId,
-          submittedAt: new Date().toISOString(),
-          timestamp: Date.now()
+          submittedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timestamp: Date.now() + idx
         }));
-        setResponses(formatted);
-      }
-    } catch (err) {
-      console.error("샘플 데이터 생성 실패:", err);
-    }
-  };
 
-  // 교사: 모든 응답 데이터 초기화
-  const handleClearAllResponses = async () => {
-    if (!window.confirm("정말로 모든 학생 응답 데이터를 초기화하시겠습니까?")) return;
-    try {
-      if (user) {
-        const responsesRef = collection(db, 'artifacts', appId, 'public', 'data', 'exit_tickets');
-        const snapshot = await getDocs(responsesRef);
-        const deletePromises = snapshot.docs.map((d) => deleteDoc(d.ref));
-        await Promise.all(deletePromises);
-      }
-      setResponses([]);
-    } catch (err) {
-      console.error("데이터 초기화 실패:", err);
-    }
-  };
-
-  // 통계 계산
-  const stats = useMemo(() => {
-    const total = responses.length;
-    if (total === 0) {
-      return {
-        total: 0,
-        high: 0,
-        medium: 0,
-        low: 0,
-        highPct: 0,
-        mediumPct: 0,
-        lowPct: 0,
-        correctCount: 0,
-        wrongCount: 0,
-        correctRate: 0,
-        wrongStudents: []
+        if (isFirebaseReady && firebase.apps.length > 0) {
+          try {
+            const db = firebase.firestore();
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'math-exit-ticket';
+            for (const s of formatted) {
+              await db.collection('artifacts').doc(appId).collection('exit_tickets').add(s);
+            }
+          } catch (e) {
+            setResponses(formatted);
+          }
+        } else {
+          setResponses(formatted);
+        }
       };
-    }
 
-    const high = responses.filter((r) => r.understanding === 'high').length;
-    const medium = responses.filter((r) => r.understanding === 'medium').length;
-    const low = responses.filter((r) => r.understanding === 'low').length;
+      // 교사: 모든 응답 초기화
+      const handleClearAllResponses = async () => {
+        if (!window.confirm("모든 학생 응답 데이터를 초기화하시겠습니까?")) return;
+        if (isFirebaseReady && firebase.apps.length > 0) {
+          try {
+            const db = firebase.firestore();
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'math-exit-ticket';
+            const snapshot = await db.collection('artifacts').doc(appId).collection('exit_tickets').get();
+            const batch = db.batch();
+            snapshot.docs.forEach((d) => batch.delete(d.ref));
+            await batch.commit();
+          } catch (e) {}
+        }
+        setResponses([]);
+      };
 
-    const correctResponses = responses.filter((r) => r.selectedAnswer === quizConfig.correctOptionId);
-    const wrongResponses = responses.filter((r) => r.selectedAnswer !== quizConfig.correctOptionId);
+      // 통계 계산
+      const stats = useMemo(() => {
+        const total = responses.length;
+        if (total === 0) {
+          return {
+            total: 0,
+            high: 0,
+            medium: 0,
+            low: 0,
+            highPct: 0,
+            mediumPct: 0,
+            lowPct: 0,
+            correctCount: 0,
+            wrongCount: 0,
+            correctRate: 0,
+            wrongStudents: []
+          };
+        }
 
-    const correctCount = correctResponses.length;
-    const wrongCount = wrongResponses.length;
-    const correctRate = Math.round((correctCount / total) * 100);
+        const high = responses.filter((r) => r.understanding === 'high').length;
+        const medium = responses.filter((r) => r.understanding === 'medium').length;
+        const low = responses.filter((r) => r.understanding === 'low').length;
 
-    return {
-      total,
-      high,
-      medium,
-      low,
-      highPct: Math.round((high / total) * 100),
-      mediumPct: Math.round((medium / total) * 100),
-      lowPct: Math.round((low / total) * 100),
-      correctCount,
-      wrongCount,
-      correctRate,
-      wrongStudents: wrongResponses.sort((a, b) => (a.studentId > b.studentId ? 1 : -1))
-    };
-  }, [responses, quizConfig]);
+        const correctResponses = responses.filter((r) => r.selectedAnswer === quizConfig.correctOptionId);
+        const wrongResponses = responses.filter((r) => r.selectedAnswer !== quizConfig.correctOptionId);
 
-  // 필터링된 응답 목록
-  const filteredResponses = useMemo(() => {
-    let list = [...responses];
-    if (filterUnderstanding !== 'all') {
-      list = list.filter((r) => r.understanding === filterUnderstanding);
-    }
-    return list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-  }, [responses, filterUnderstanding]);
+        const correctCount = correctResponses.length;
+        const wrongCount = wrongResponses.length;
+        const correctRate = Math.round((correctCount / total) * 100);
 
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans">
-      {/* 상단 네비게이션 헤더 */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-100">
-              <GraduationCap className="w-6 h-6" />
-            </div>
-            <div>
-              <h1 className="font-bold text-lg text-slate-900 leading-tight">수학 수업 3분 마무리 체크</h1>
-              <p className="text-xs text-indigo-600 font-medium">연수 실습용 실시간 Exit Ticket 피드백 시스템</p>
-            </div>
-          </div>
+        return {
+          total,
+          high,
+          medium,
+          low,
+          highPct: Math.round((high / total) * 100),
+          mediumPct: Math.round((medium / total) * 100),
+          lowPct: Math.round((low / total) * 100),
+          correctCount,
+          wrongCount,
+          correctRate,
+          wrongStudents: wrongResponses.sort((a, b) => (a.studentId > b.studentId ? 1 : -1))
+        };
+      }, [responses, quizConfig]);
 
-          {/* 역할 전환 토글 탭 */}
-          <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
-            <button
-              onClick={() => setActiveTab('student')}
-              className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
-                activeTab === 'student'
-                  ? 'bg-white text-indigo-700 shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Users className="w-4 h-4" />
-              <span>학생 참여 화면</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('teacher')}
-              className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all relative ${
-                activeTab === 'teacher'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4" />
-              <span>교사 대시보드</span>
-              {responses.length > 0 && (
-                <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
-                  activeTab === 'teacher' ? 'bg-indigo-800 text-indigo-100' : 'bg-indigo-600 text-white'
-                }`}>
-                  {responses.length}
-                </span>
-              )}
-            </button>
-          </div>
-        </div>
-      </header>
+      // 필터링된 응답 목록
+      const filteredResponses = useMemo(() => {
+        let list = [...responses];
+        if (filterUnderstanding !== 'all') {
+          list = list.filter((r) => r.understanding === filterUnderstanding);
+        }
+        return list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      }, [responses, filterUnderstanding]);
 
-      {/* 메인 컨텐츠 영역 */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6">
-        {activeTab === 'student' ? (
-          /* ==============================================
-             [1. 학생용 참여 화면]
-             ============================================== */
-          <div className="max-w-2xl mx-auto">
-            {submitted ? (
-              /* 제출 완료 카드 */
-              <div className="bg-white rounded-2xl p-8 border border-emerald-100 shadow-lg text-center mt-6 animate-fadeIn">
-                <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <CheckCircle2 className="w-10 h-10" />
+      return (
+        <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans">
+          {/* 상단 네비게이션 헤더 */}
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-100">
+                  <IconGraduation />
                 </div>
-                <h2 className="text-2xl font-bold text-slate-900 mb-2">제출이 완료되었습니다!</h2>
-                <p className="text-slate-600 mb-6 text-sm">
-                  <span className="font-semibold text-slate-800">{studentId} {studentName}</span> 학생의 소중한 의견이 선생님께 실시간 전달되었습니다. 오늘 수학 수업도 수고 많았습니다! 👏
-                </p>
-
-                <div className="bg-slate-50 rounded-xl p-4 text-left border border-slate-200 mb-6 space-y-3">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-500 font-medium">나의 이해도:</span>
-                    <span className="font-semibold">
-                      {understanding === 'high' && '🟢 잘 이해했어요'}
-                      {understanding === 'medium' && '🟡 조금 헷갈려요'}
-                      {understanding === 'low' && '🔴 잘 모르겠어요'}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-slate-500 font-medium">확인 문제 선택:</span>
-                    <span className={`font-semibold ${selectedAnswer === quizConfig.correctOptionId ? 'text-emerald-600' : 'text-amber-600'}`}>
-                      {quizConfig.options.find(o => o.id === selectedAnswer)?.text} 
-                      {selectedAnswer === quizConfig.correctOptionId ? ' (정답! 🎉)' : ' (선생님 해설을 확인해보세요)'}
-                    </span>
-                  </div>
-                  {confusingTopic && (
-                    <div className="text-sm pt-2 border-t border-slate-200">
-                      <span className="text-slate-500 font-medium block mb-1">작성한 질문/헷갈리는 점:</span>
-                      <p className="text-slate-700 bg-white p-2.5 rounded-lg border border-slate-200 text-xs">
-                        "{confusingTopic}"
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex flex-col sm:flex-row gap-3 justify-center">
-                  <button
-                    onClick={handleResetForm}
-                    className="px-5 py-2.5 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-100 font-medium text-sm transition-colors"
-                  >
-                    내용 수정 후 다시 제출하기
-                  </button>
-                  <button
-                    onClick={() => setActiveTab('teacher')}
-                    className="px-5 py-2.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 font-medium text-sm transition-colors flex items-center justify-center space-x-1"
-                  >
-                    <span>교사 화면에서 집계 확인하기</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </button>
+                <div>
+                  <h1 className="font-bold text-base sm:text-lg text-slate-900 leading-tight">수학 수업 3분 마무리 체크</h1>
+                  <p className="text-xs text-indigo-600 font-medium hidden sm:block">실시간 형성평가 & 이해도 피드백 시스템</p>
                 </div>
               </div>
+
+              {/* 학생 / 교사 탭 전환 */}
+              <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
+                <button
+                  onClick={() => setActiveTab('student')}
+                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
+                    activeTab === 'student'
+                      ? 'bg-white text-indigo-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <IconUsers />
+                  <span>학생 참여</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('teacher')}
+                  className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
+                    activeTab === 'teacher'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <IconChart />
+                  <span>교사 대시보드</span>
+                  {responses.length > 0 && (
+                    <span className={`ml-1 text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                      activeTab === 'teacher' ? 'bg-indigo-800 text-indigo-100' : 'bg-indigo-600 text-white'
+                    }`}>
+                      {responses.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {/* 본문 영역 */}
+          <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6">
+            {activeTab === 'student' ? (
+              /* ================= [1. 학생 참여 화면] ================= */
+              <div className="max-w-2xl mx-auto">
+                {submitted ? (
+                  /* 제출 완료 카드 */
+                  <div className="bg-white rounded-2xl p-6 sm:p-8 border border-emerald-100 shadow-lg text-center mt-4 animate-fadeIn">
+                    <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <IconCheckCircle />
+                    </div>
+                    <h2 className="text-2xl font-bold text-slate-900 mb-2">제출 완료! 🎉</h2>
+                    <p className="text-slate-600 mb-6 text-sm">
+                      <span className="font-semibold text-slate-800">{studentId} {studentName}</span> 학생의 소중한 답변이 선생님께 전달되었습니다. 오늘 수학 수업도 고생 많았습니다!
+                    </p>
+
+                    <div className="bg-slate-50 rounded-xl p-4 text-left border border-slate-200 mb-6 space-y-3">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-slate-500 font-medium">나의 이해도:</span>
+                        <span className="font-bold">
+                          {understanding === 'high' && '🟢 잘 이해했어요'}
+                          {understanding === 'medium' && '🟡 조금 헷갈려요'}
+                          {understanding === 'low' && '🔴 잘 모르겠어요'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-slate-500 font-medium">선택한 문제 정답:</span>
+                        <span className={`font-semibold ${selectedAnswer === quizConfig.correctOptionId ? 'text-emerald-600' : 'text-amber-600'}`}>
+                          {quizConfig.options.find(o => o.id === selectedAnswer)?.text} 
+                          {selectedAnswer === quizConfig.correctOptionId ? ' (정답! ✨)' : ' (선생님 피드백을 확인해보세요)'}
+                        </span>
+                      </div>
+                      {confusingTopic && (
+                        <div className="text-sm pt-2 border-t border-slate-200">
+                          <span className="text-slate-500 font-medium block mb-1">작성한 질문/헷갈리는 점:</span>
+                          <p className="text-slate-700 bg-white p-2.5 rounded-lg border border-slate-200 text-xs">
+                            "{confusingTopic}"
+                          </p>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                      <button
+                        onClick={handleResetForm}
+                        className="px-5 py-2.5 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-100 font-medium text-sm transition-colors"
+                      >
+                        수정 후 다시 제출하기
+                      </button>
+                      <button
+                        onClick={() => setActiveTab('teacher')}
+                        className="px-5 py-2.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 font-medium text-sm transition-colors"
+                      >
+                        교사 화면에서 실시간 집계 확인
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* 학생 질문 작성 폼 */
+                  <form onSubmit={handleSubmitResponse} className="space-y-5">
+                    {/* 상단 안내 배너 */}
+                    <div className="bg-gradient-to-r from-indigo-600 to-indigo-800 rounded-2xl p-5 text-white shadow-md">
+                      <div className="flex items-center space-x-1.5 text-indigo-200 text-xs font-semibold uppercase tracking-wider mb-1">
+                        <IconClock />
+                        <span>수업 종료 3분 전 체크타임</span>
+                      </div>
+                      <h2 className="text-xl font-bold">오늘의 수학 수업 배움 확인</h2>
+                      <p className="text-indigo-100 text-xs mt-1">
+                        오늘 배운 핵심 내용을 되돌아보고 솔직하게 작성해주세요.
+                      </p>
+                    </div>
+
+                    {/* 기본 정보 (학번 & 이름) */}
+                    <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+                      <h3 className="font-semibold text-slate-900 text-sm mb-3 flex items-center space-x-2">
+                        <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center text-xs font-bold">1</span>
+                        <span>학생 기본 정보</span>
+                      </h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-600 mb-1">
+                            학번 (예: 10101, 1-1-1) <span className="text-rose-500">*</span>
+                          </label>
+                          <input
+                            type="text"
+                            value={studentId}
+                            onChange={(e) => setStudentId(e.target.value)}
+                            placeholder="예: 10105"
+                            required
+                            className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-600 mb-1">
+                            이름 <span className="text-rose-500">*</span>
+                          </label>
+                          <input
+                            type="text"
+                            value={studentName}
+                            onChange={(e) => setStudentName(e.target.value)}
+                            placeholder="예: 홍길동"
+                            required
+                            className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 1. 이해도 선택 (3지선다) */}
+                    <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+                      <h3 className="font-semibold text-slate-900 text-sm mb-3 flex items-center space-x-2">
+                        <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-bold">2</span>
+                        <span>오늘 배운 내용의 이해도를 선택해주세요. <span className="text-rose-500">*</span></span>
+                      </h3>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setUnderstanding('high')}
+                          className={`p-4 rounded-xl border-2 text-center transition-all flex flex-col items-center justify-center space-y-1.5 ${
+                            understanding === 'high'
+                              ? 'border-emerald-500 bg-emerald-50/90 text-emerald-900 shadow-xs ring-2 ring-emerald-400/30'
+                              : 'border-slate-200 bg-slate-50/50 hover:bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          <span className="text-2xl">😊</span>
+                          <span className="font-bold text-sm">잘 이해했어요</span>
+                          <span className="text-[11px] text-slate-500">혼자서 풀 수 있어요</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setUnderstanding('medium')}
+                          className={`p-4 rounded-xl border-2 text-center transition-all flex flex-col items-center justify-center space-y-1.5 ${
+                            understanding === 'medium'
+                              ? 'border-amber-500 bg-amber-50/90 text-amber-900 shadow-xs ring-2 ring-amber-400/30'
+                              : 'border-slate-200 bg-slate-50/50 hover:bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          <span className="text-2xl">🤔</span>
+                          <span className="font-bold text-sm">조금 헷갈려요</span>
+                          <span className="text-[11px] text-slate-500">도움이 약간 필요해요</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setUnderstanding('low')}
+                          className={`p-4 rounded-xl border-2 text-center transition-all flex flex-col items-center justify-center space-y-1.5 ${
+                            understanding === 'low'
+                              ? 'border-rose-500 bg-rose-50/90 text-rose-900 shadow-xs ring-2 ring-rose-400/30'
+                              : 'border-slate-200 bg-slate-50/50 hover:bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          <span className="text-2xl">😢</span>
+                          <span className="font-bold text-sm">잘 모르겠어요</span>
+                          <span className="text-[11px] text-slate-500">다시 설명이 필요해요</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 2. 오늘의 수학 확인 문제 */}
+                    <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="font-semibold text-slate-900 text-sm flex items-center space-x-2">
+                          <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-bold">3</span>
+                          <span>오늘의 확인 문제 (1문제) <span className="text-rose-500">*</span></span>
+                        </h3>
+                        <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">개념 체크</span>
+                      </div>
+
+                      <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 mb-4">
+                        <p className="text-sm font-semibold text-slate-900 whitespace-pre-wrap">
+                          Q. {quizConfig.question}
+                        </p>
+                      </div>
+
+                      <div className="space-y-2.5">
+                        {quizConfig.options.map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => setSelectedAnswer(opt.id)}
+                            className={`w-full p-3.5 rounded-xl border text-left text-sm font-medium transition-all flex items-center justify-between ${
+                              selectedAnswer === opt.id
+                                ? 'border-indigo-600 bg-indigo-50/80 text-indigo-950 font-bold ring-2 ring-indigo-400/30'
+                                : 'border-slate-200 hover:bg-slate-50 text-slate-700'
+                            }`}
+                          >
+                            <div className="flex items-center space-x-3">
+                              <span className={`w-6 h-6 rounded-full text-xs flex items-center justify-center font-bold ${
+                                selectedAnswer === opt.id ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-600'
+                              }`}>
+                                {opt.id}
+                              </span>
+                              <span>{opt.text}</span>
+                            </div>
+                            {selectedAnswer === opt.id && (
+                              <IconCheck className="w-4 h-4 text-indigo-600" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* 3. 가장 헷갈리는 내용 서술 */}
+                    <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs">
+                      <h3 className="font-semibold text-slate-900 text-sm mb-1 flex items-center space-x-2">
+                        <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-bold">4</span>
+                        <span>가장 헷갈리거나 질문하고 싶은 내용을 적어주세요.</span>
+                      </h3>
+                      <p className="text-xs text-slate-500 mb-3 ml-7">
+                        어떤 풀이 과정이나 개념이 어려웠나요? 짧게 적어도 괜찮습니다. (없으면 '없음' 입력)
+                      </p>
+                      <textarea
+                        rows={3}
+                        value={confusingTopic}
+                        onChange={(e) => setConfusingTopic(e.target.value)}
+                        placeholder="예: 등식의 양변을 나눌 때 부호 실수가 잦아요 / 이항할 때 부호 바뀌는 원리가 헷갈려요"
+                        className="w-full p-3.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                      />
+                    </div>
+
+                    {/* 상태 메시지 */}
+                    {statusMessage.text && (
+                      <div className={`p-3.5 rounded-xl text-xs sm:text-sm font-medium ${
+                        statusMessage.type === 'error' ? 'bg-rose-50 text-rose-700 border border-rose-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      }`}>
+                        {statusMessage.text}
+                      </div>
+                    )}
+
+                    {/* 제출 버튼 */}
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className="w-full py-3.5 px-6 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-base shadow-lg shadow-indigo-100 transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
+                    >
+                      {isSubmitting ? (
+                        <span>제출 중입니다...</span>
+                      ) : (
+                        <>
+                          <span>선생님께 제출하기</span>
+                          <IconSend />
+                        </>
+                      )}
+                    </button>
+                  </form>
+                )}
+              </div>
             ) : (
-              /* 학생 질문지 폼 */
-              <form onSubmit={handleSubmitResponse} className="space-y-6">
-                {/* 상단 안내 배너 */}
-                <div className="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-2xl p-5 text-white shadow-md">
-                  <div className="flex items-center space-x-2 text-indigo-100 text-xs font-semibold uppercase tracking-wider mb-1">
-                    <Clock className="w-4 h-4" />
-                    <span>수업 종료 3분 전 체크타임</span>
-                  </div>
-                  <h2 className="text-xl font-bold">오늘의 수학 학습 확인하기</h2>
-                  <p className="text-indigo-100 text-xs mt-1">
-                    오늘 배운 핵심 내용을 되돌아보고, 솔직하게 작성해주세요. 선생님이 다음 수업에 반영합니다!
-                  </p>
-                </div>
-
-                {/* 기본 정보 (학번 & 이름) */}
-                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
-                  <h3 className="font-semibold text-slate-900 text-sm mb-3 flex items-center space-x-1.5">
-                    <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center text-xs font-bold">1</span>
-                    <span>학생 기본 정보</span>
-                  </h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">
-                        학번 (예: 10101, 1-1-1) <span className="text-rose-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={studentId}
-                        onChange={(e) => setStudentId(e.target.value)}
-                        placeholder="예: 10105"
-                        required
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
-                      />
+              /* ================= [2. 교사 대시보드 화면] ================= */
+              <div className="space-y-6 animate-fadeIn">
+                {/* 상단 실시간 컨트롤 바 */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <h2 className="text-xl font-bold text-slate-900">실시간 수업 마무리 피드백</h2>
+                      <span className="flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                        <span>실시간 집계 중</span>
+                      </span>
                     </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">
-                        이름 <span className="text-rose-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={studentName}
-                        onChange={(e) => setStudentName(e.target.value)}
-                        placeholder="예: 홍길동"
-                        required
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* 질문 1: 이해도 3지선다 */}
-                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="font-semibold text-slate-900 text-sm flex items-center space-x-1.5">
-                      <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-bold">2</span>
-                      <span>오늘 배운 내용의 이해도를 선택해주세요. <span className="text-rose-500">*</span></span>
-                    </h3>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    {/* 잘 이해했어요 */}
-                    <button
-                      type="button"
-                      onClick={() => setUnderstanding('high')}
-                      className={`p-4 rounded-xl border-2 text-center transition-all flex flex-col items-center justify-center space-y-2 ${
-                        understanding === 'high'
-                          ? 'border-emerald-500 bg-emerald-50/80 text-emerald-900 shadow-sm ring-2 ring-emerald-400/30'
-                          : 'border-slate-200 bg-slate-50/50 hover:bg-slate-100 text-slate-700'
-                      }`}
-                    >
-                      <span className="text-2xl">😊</span>
-                      <span className="font-bold text-sm">잘 이해했어요</span>
-                      <span className="text-[11px] text-slate-500">혼자서 문제 해결 가능</span>
-                    </button>
-
-                    {/* 조금 헷갈려요 */}
-                    <button
-                      type="button"
-                      onClick={() => setUnderstanding('medium')}
-                      className={`p-4 rounded-xl border-2 text-center transition-all flex flex-col items-center justify-center space-y-2 ${
-                        understanding === 'medium'
-                          ? 'border-amber-500 bg-amber-50/80 text-amber-900 shadow-sm ring-2 ring-amber-400/30'
-                          : 'border-slate-200 bg-slate-50/50 hover:bg-slate-100 text-slate-700'
-                      }`}
-                    >
-                      <span className="text-2xl">🤔</span>
-                      <span className="font-bold text-sm">조금 헷갈려요</span>
-                      <span className="text-[11px] text-slate-500">도움이 조금 필요해요</span>
-                    </button>
-
-                    {/* 잘 모르겠어요 */}
-                    <button
-                      type="button"
-                      onClick={() => setUnderstanding('low')}
-                      className={`p-4 rounded-xl border-2 text-center transition-all flex flex-col items-center justify-center space-y-2 ${
-                        understanding === 'low'
-                          ? 'border-rose-500 bg-rose-50/80 text-rose-900 shadow-sm ring-2 ring-rose-400/30'
-                          : 'border-slate-200 bg-slate-50/50 hover:bg-slate-100 text-slate-700'
-                      }`}
-                    >
-                      <span className="text-2xl">😢</span>
-                      <span className="font-bold text-sm">잘 모르겠어요</span>
-                      <span className="text-[11px] text-slate-500">처음부터 다시 설명 필요</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* 질문 2: 오늘의 수학 확인 문제 */}
-                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="font-semibold text-slate-900 text-sm flex items-center space-x-1.5">
-                      <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-bold">3</span>
-                      <span>오늘의 확인 문제 (1문제) <span className="text-rose-500">*</span></span>
-                    </h3>
-                    <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded font-medium">개념 체크</span>
-                  </div>
-
-                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 mb-4">
-                    <p className="text-sm font-semibold text-slate-900 whitespace-pre-wrap">
-                      Q. {quizConfig.question}
+                    <p className="text-xs text-slate-500 mt-1">
+                      현재 총 <span className="font-bold text-indigo-600">{stats.total}명</span>의 학생이 응답을 완료했습니다.
                     </p>
                   </div>
 
-                  <div className="space-y-2.5">
-                    {quizConfig.options.map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => setSelectedAnswer(opt.id)}
-                        className={`w-full p-3.5 rounded-xl border text-left text-sm font-medium transition-all flex items-center justify-between ${
-                          selectedAnswer === opt.id
-                            ? 'border-indigo-600 bg-indigo-50/80 text-indigo-950 font-bold ring-2 ring-indigo-400/30'
-                            : 'border-slate-200 hover:bg-slate-50 text-slate-700'
-                        }`}
-                      >
-                        <div className="flex items-center space-x-3">
-                          <span className={`w-6 h-6 rounded-full text-xs flex items-center justify-center font-bold ${
-                            selectedAnswer === opt.id ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-600'
-                          }`}>
-                            {opt.id}
-                          </span>
-                          <span>{opt.text}</span>
+                  {/* 실습 도구 버튼들 */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => setIsEditingQuiz(true)}
+                      className="px-3 py-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center space-x-1.5 transition-colors"
+                    >
+                      <IconEdit />
+                      <span>확인 문제 수정</span>
+                    </button>
+                    <button
+                      onClick={handleGenerateSampleData}
+                      className="px-3 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold flex items-center space-x-1.5 transition-colors"
+                      title="연수 실습용 10명의 가상 학생 응답을 즉시 채워 넣습니다."
+                    >
+                      <IconSparkles />
+                      <span>실습용 10명 데이터 추가</span>
+                    </button>
+                    <button
+                      onClick={handleClearAllResponses}
+                      className="px-3 py-2 rounded-xl border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs font-semibold flex items-center space-x-1.5 transition-colors"
+                      title="모든 응답 데이터를 비웁니다."
+                    >
+                      <IconRefresh />
+                      <span>초기화</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 핵심 통계 요약 (이해도 현황 & 정답률/오답 분석) */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* 1. 이해도 현황 통계 카드 */}
+                  <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="font-bold text-slate-900 text-base flex items-center space-x-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-indigo-600"></span>
+                          <span>학습 내용 이해도 현황</span>
+                        </h3>
+                        <span className="text-xs text-slate-400 font-medium">3점 척도</span>
+                      </div>
+
+                      {/* 3지선다 인원수 카드 */}
+                      <div className="grid grid-cols-3 gap-3 mb-6">
+                        <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3.5 text-center">
+                          <div className="text-2xl mb-1">😊</div>
+                          <div className="text-xs font-semibold text-emerald-800">잘 이해했어요</div>
+                          <div className="text-2xl font-extrabold text-emerald-600 mt-1">
+                            {stats.high}<span className="text-xs font-normal text-emerald-800 ml-0.5">명</span>
+                          </div>
+                          <div className="text-[11px] text-emerald-700/80 font-medium">{stats.highPct}%</div>
                         </div>
-                        {selectedAnswer === opt.id && (
-                          <Check className="w-4 h-4 text-indigo-600" />
+
+                        <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3.5 text-center">
+                          <div className="text-2xl mb-1">🤔</div>
+                          <div className="text-xs font-semibold text-amber-800">조금 헷갈려요</div>
+                          <div className="text-2xl font-extrabold text-amber-600 mt-1">
+                            {stats.medium}<span className="text-xs font-normal text-amber-800 ml-0.5">명</span>
+                          </div>
+                          <div className="text-[11px] text-amber-700/80 font-medium">{stats.mediumPct}%</div>
+                        </div>
+
+                        <div className="bg-rose-50/70 border border-rose-200 rounded-xl p-3.5 text-center">
+                          <div className="text-2xl mb-1">😢</div>
+                          <div className="text-xs font-semibold text-rose-800">잘 모르겠어요</div>
+                          <div className="text-2xl font-extrabold text-rose-600 mt-1">
+                            {stats.low}<span className="text-xs font-normal text-rose-800 ml-0.5">명</span>
+                          </div>
+                          <div className="text-[11px] text-rose-700/80 font-medium">{stats.lowPct}%</div>
+                        </div>
+                      </div>
+
+                      {/* 시각화 프로그레스 바 */}
+                      <div className="space-y-1.5">
+                        <div className="flex justify-between text-xs font-medium text-slate-500">
+                          <span>비율 막대</span>
+                          <span>전체 {stats.total}명</span>
+                        </div>
+                        <div className="h-4 rounded-full bg-slate-100 flex overflow-hidden p-0.5 border border-slate-200">
+                          {stats.highPct > 0 && (
+                            <div
+                              style={{ width: `${stats.highPct}%` }}
+                              className="bg-emerald-500 rounded-l-full h-full transition-all duration-500"
+                              title={`잘 이해했어요: ${stats.high}명 (${stats.highPct}%)`}
+                            />
+                          )}
+                          {stats.mediumPct > 0 && (
+                            <div
+                              style={{ width: `${stats.mediumPct}%` }}
+                              className="bg-amber-400 h-full transition-all duration-500"
+                              title={`조금 헷갈려요: ${stats.medium}명 (${stats.mediumPct}%)`}
+                            />
+                          )}
+                          {stats.lowPct > 0 && (
+                            <div
+                              style={{ width: `${stats.lowPct}%` }}
+                              className="bg-rose-500 rounded-r-full h-full transition-all duration-500"
+                              title={`잘 모르겠어요: ${stats.low}명 (${stats.lowPct}%)`}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 교사용 피드백 가이드 */}
+                    <div className="mt-5 p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center space-x-2">
+                      <IconTrending />
+                      <span>
+                        {stats.low + stats.medium > stats.high
+                          ? '⚠️ 보충 설명이 필요한 학생이 많습니다. 다음 시간 도입부에 핵심 풀이 2분 복습을 권장합니다.'
+                          : '✨ 전반적으로 수업 목표 도달도가 우수합니다. 심화 연습으로 원활히 진행할 수 있습니다.'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* 2. 확인 문제 정답률 및 오답 학생 학번 리스트 */}
+                  <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="font-bold text-slate-900 text-base flex items-center space-x-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-indigo-600"></span>
+                          <span>확인 문제 정답률 & 오답 분석</span>
+                        </h3>
+                        <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-md font-bold">
+                          정답: {quizConfig.correctOptionId}번
+                        </span>
+                      </div>
+
+                      {/* 정답률 수치 카드 */}
+                      <div className="grid grid-cols-2 gap-3 mb-5">
+                        <div className="p-4 rounded-xl bg-indigo-50/60 border border-indigo-100 flex items-center justify-between">
+                          <div>
+                            <div className="text-xs font-semibold text-indigo-700">확인 문제 정답률</div>
+                            <div className="text-3xl font-extrabold text-indigo-600 mt-1">
+                              {stats.correctRate}<span className="text-lg font-bold">%</span>
+                            </div>
+                          </div>
+                          <div className="text-xs text-indigo-800 font-medium bg-white px-2 py-1 rounded-lg shadow-xs border border-indigo-100">
+                            {stats.correctCount} / {stats.total}명
+                          </div>
+                        </div>
+
+                        <div className="p-4 rounded-xl bg-rose-50/60 border border-rose-100 flex items-center justify-between">
+                          <div>
+                            <div className="text-xs font-semibold text-rose-700">오답자 수</div>
+                            <div className="text-3xl font-extrabold text-rose-600 mt-1">
+                              {stats.wrongCount}<span className="text-lg font-bold">명</span>
+                            </div>
+                          </div>
+                          <div className="text-xs text-rose-800 font-medium bg-white px-2 py-1 rounded-lg shadow-xs border border-rose-100">
+                            오답률 {stats.total > 0 ? 100 - stats.correctRate : 0}%
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* 오답 학생 학번 목록 */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="text-xs font-bold text-slate-700 flex items-center space-x-1.5">
+                            <IconUserX />
+                            <span>오답 학생 학번 및 선택 보기</span>
+                          </h4>
+                          <span className="text-[11px] text-slate-400">총 {stats.wrongStudents.length}명</span>
+                        </div>
+
+                        {stats.wrongStudents.length > 0 ? (
+                          <div className="max-h-36 overflow-y-auto p-2.5 bg-rose-50/30 rounded-xl border border-rose-200 flex flex-wrap gap-2">
+                            {stats.wrongStudents.map((st) => (
+                              <div
+                                key={st.id || st.studentId}
+                                className="bg-white border border-rose-300 px-2.5 py-1 rounded-lg text-xs flex items-center space-x-1.5 shadow-xs"
+                              >
+                                <span className="font-bold text-rose-700 font-mono">{st.studentId}</span>
+                                <span className="text-slate-600 font-medium">({st.studentName})</span>
+                                <span className="bg-rose-100 text-rose-800 font-bold px-1.5 py-0.5 rounded text-[10px]">
+                                  {st.selectedAnswer}번 선택
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="p-4 bg-emerald-50/50 rounded-xl border border-emerald-200 text-center text-xs text-emerald-800 font-medium">
+                            {stats.total === 0 ? "아직 제출된 응답이 없습니다." : "🎉 모든 학생이 정답을 맞혔습니다!"}
+                          </div>
                         )}
-                      </button>
-                    ))}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500 truncate">
+                      <span className="font-semibold text-slate-700">문제:</span> {quizConfig.question}
+                    </div>
                   </div>
                 </div>
 
-                {/* 질문 3: 가장 헷갈리는 내용 작성 */}
-                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
-                  <h3 className="font-semibold text-slate-900 text-sm mb-2 flex items-center space-x-1.5">
-                    <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-bold">4</span>
-                    <span>가장 헷갈리거나 질문하고 싶은 내용을 적어주세요.</span>
-                  </h3>
-                  <p className="text-xs text-slate-500 mb-3">
-                    어떤 풀이 과정이나 개념이 잘 와닿지 않았나요? 짧게 적어도 괜찮습니다. (없으면 '없음' 입력)
-                  </p>
-                  <textarea
-                    rows={3}
-                    value={confusingTopic}
-                    onChange={(e) => setConfusingTopic(e.target.value)}
-                    placeholder="예: 식을 이항할 때 부호 바뀌는 게 아직 헷갈려요 / 괄호가 있는 문제 풀이법이 어려워요"
-                    className="w-full p-3.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
-                  />
-                </div>
-
-                {/* 에러/알림 메시지 */}
-                {statusMessage.text && (
-                  <div className={`p-3.5 rounded-xl text-xs sm:text-sm font-medium flex items-center space-x-2 ${
-                    statusMessage.type === 'error' ? 'bg-rose-50 text-rose-700 border border-rose-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                  }`}>
-                    {statusMessage.type === 'error' ? <AlertCircle className="w-4 h-4 flex-shrink-0" /> : <CheckCircle2 className="w-4 h-4 flex-shrink-0" />}
-                    <span>{statusMessage.text}</span>
-                  </div>
-                )}
-
-                {/* 제출 버튼 */}
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="w-full py-3.5 px-6 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-base shadow-lg shadow-indigo-100 transition-all flex items-center justify-center space-x-2 disabled:opacity-50"
-                >
-                  {isSubmitting ? (
-                    <span>제출 중입니다...</span>
-                  ) : (
-                    <>
-                      <span>선생님께 제출하기</span>
-                      <Send className="w-4 h-4" />
-                    </>
-                  )}
-                </button>
-              </form>
-            )}
-          </div>
-        ) : (
-          /* ==============================================
-             [2. 교사용 대시보드 화면]
-             ============================================== */
-          <div className="space-y-6 animate-fadeIn">
-            {/* 상단 컨트롤 바 */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div>
-                <div className="flex items-center space-x-2">
-                  <h2 className="text-xl font-bold text-slate-900">실시간 수업 마무리 피드백</h2>
-                  <span className="flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700 animate-pulse">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                    <span>실시간 수신 중</span>
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 mt-1">
-                  현재 총 <span className="font-bold text-indigo-600">{stats.total}명</span>의 학생이 응답을 제출했습니다.
-                </p>
-              </div>
-
-              {/* 실습 도구 버튼들 */}
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={() => setIsEditingQuiz(true)}
-                  className="px-3 py-2 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center space-x-1.5 transition-colors"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                  <span>확인 문제 편집</span>
-                </button>
-                <button
-                  onClick={handleGenerateSampleData}
-                  className="px-3 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold flex items-center space-x-1.5 transition-colors"
-                  title="연수 실습용 10명의 가상 학생 응답을 즉시 채워 넣습니다."
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>실습용 샘플 10명 추가</span>
-                </button>
-                <button
-                  onClick={handleClearAllResponses}
-                  className="px-3 py-2 rounded-xl border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs font-semibold flex items-center space-x-1.5 transition-colors"
-                  title="모든 응답 데이터를 비웁니다."
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>초기화</span>
-                </button>
-              </div>
-            </div>
-
-            {/* 핵심 통계 요약 2열 카드 (이해도 분석 & 정답률 분석) */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* 1. 이해도 분석 카드 */}
-              <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between">
-                <div>
+                {/* 3. 학생들이 남긴 헷갈리는 내용/질문 보드 */}
+                <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs">
                   <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-bold text-slate-900 text-base flex items-center space-x-2">
-                      <span className="w-2.5 h-2.5 rounded-full bg-indigo-600"></span>
-                      <span>학습 내용 이해도 현황</span>
-                    </h3>
-                    <span className="text-xs text-slate-400 font-medium">3점 척도</span>
-                  </div>
-
-                  {/* 3가지 이해도 수치 카드 */}
-                  <div className="grid grid-cols-3 gap-3 mb-6">
-                    {/* 잘 이해했어요 */}
-                    <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3.5 text-center">
-                      <div className="text-2xl mb-1">😊</div>
-                      <div className="text-xs font-semibold text-emerald-800">잘 이해했어요</div>
-                      <div className="text-2xl font-extrabold text-emerald-600 mt-1">
-                        {stats.high}<span className="text-xs font-normal text-emerald-800 ml-0.5">명</span>
-                      </div>
-                      <div className="text-[11px] text-emerald-700/80 font-medium">{stats.highPct}%</div>
+                    <div className="flex items-center space-x-2">
+                      <IconMessage />
+                      <h3 className="font-bold text-slate-900 text-base">학생들이 남긴 헷갈리는 내용 & 질문</h3>
                     </div>
-
-                    {/* 조금 헷갈려요 */}
-                    <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3.5 text-center">
-                      <div className="text-2xl mb-1">🤔</div>
-                      <div className="text-xs font-semibold text-amber-800">조금 헷갈려요</div>
-                      <div className="text-2xl font-extrabold text-amber-600 mt-1">
-                        {stats.medium}<span className="text-xs font-normal text-amber-800 ml-0.5">명</span>
-                      </div>
-                      <div className="text-[11px] text-amber-700/80 font-medium">{stats.mediumPct}%</div>
-                    </div>
-
-                    {/* 잘 모르겠어요 */}
-                    <div className="bg-rose-50/70 border border-rose-200 rounded-xl p-3.5 text-center">
-                      <div className="text-2xl mb-1">😢</div>
-                      <div className="text-xs font-semibold text-rose-800">잘 모르겠어요</div>
-                      <div className="text-2xl font-extrabold text-rose-600 mt-1">
-                        {stats.low}<span className="text-xs font-normal text-rose-800 ml-0.5">명</span>
-                      </div>
-                      <div className="text-[11px] text-rose-700/80 font-medium">{stats.lowPct}%</div>
-                    </div>
-                  </div>
-
-                  {/* 시각화 프로그레스 바 */}
-                  <div className="space-y-1.5">
-                    <div className="flex justify-between text-xs font-medium text-slate-500">
-                      <span>비율 막대</span>
-                      <span>전체 {stats.total}명</span>
-                    </div>
-                    <div className="h-4 rounded-full bg-slate-100 flex overflow-hidden p-0.5 border border-slate-200">
-                      {stats.highPct > 0 && (
-                        <div
-                          style={{ width: `${stats.highPct}%` }}
-                          className="bg-emerald-500 rounded-l-full h-full transition-all duration-500"
-                          title={`잘 이해했어요: ${stats.high}명 (${stats.highPct}%)`}
-                        />
-                      )}
-                      {stats.mediumPct > 0 && (
-                        <div
-                          style={{ width: `${stats.mediumPct}%` }}
-                          className="bg-amber-400 h-full transition-all duration-500"
-                          title={`조금 헷갈려요: ${stats.medium}명 (${stats.mediumPct}%)`}
-                        />
-                      )}
-                      {stats.lowPct > 0 && (
-                        <div
-                          style={{ width: `${stats.lowPct}%` }}
-                          className="bg-rose-500 rounded-r-full h-full transition-all duration-500"
-                          title={`잘 모르겠어요: ${stats.low}명 (${stats.lowPct}%)`}
-                        />
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* 교사용 원포인트 조언 */}
-                <div className="mt-5 p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center space-x-2">
-                  <TrendingUp className="w-4 h-4 text-indigo-600 flex-shrink-0" />
-                  <span>
-                    {stats.low + stats.medium > stats.high
-                      ? '⚠️ 보충 설명이 필요한 학생이 과반수입니다. 다음 시간 도입부에 핵심 개념 2분 복습을 권장합니다.'
-                      : '✨ 전반적으로 수업 목표 도달도가 우수합니다. 심화 또는 응용 단계로 원활히 진행할 수 있습니다.'}
-                  </span>
-                </div>
-              </div>
-
-              {/* 2. 확인 문제 정답률 및 오답 학생 학번 리스트 */}
-              <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-bold text-slate-900 text-base flex items-center space-x-2">
-                      <span className="w-2.5 h-2.5 rounded-full bg-indigo-600"></span>
-                      <span>확인 문제 정답률 & 오답 분석</span>
-                    </h3>
-                    <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-md font-bold">
-                      정답: {quizConfig.correctOptionId}번
+                    <span className="text-xs bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full font-medium">
+                      수업 종료 1분 즉시 피드백용
                     </span>
                   </div>
 
-                  {/* 정답률 수치 카드 */}
-                  <div className="grid grid-cols-2 gap-3 mb-5">
-                    <div className="p-4 rounded-xl bg-indigo-50/60 border border-indigo-100 flex items-center justify-between">
-                      <div>
-                        <div className="text-xs font-semibold text-indigo-700">확인 문제 정답률</div>
-                        <div className="text-3xl font-extrabold text-indigo-600 mt-1">
-                          {stats.correctRate}<span className="text-lg font-bold">%</span>
-                        </div>
-                      </div>
-                      <div className="text-xs text-indigo-800 font-medium bg-white px-2.5 py-1 rounded-lg shadow-sm border border-indigo-100">
-                        {stats.correctCount} / {stats.total}명 정답
-                      </div>
-                    </div>
-
-                    <div className="p-4 rounded-xl bg-rose-50/60 border border-rose-100 flex items-center justify-between">
-                      <div>
-                        <div className="text-xs font-semibold text-rose-700">오답자 수</div>
-                        <div className="text-3xl font-extrabold text-rose-600 mt-1">
-                          {stats.wrongCount}<span className="text-lg font-bold">명</span>
-                        </div>
-                      </div>
-                      <div className="text-xs text-rose-800 font-medium bg-white px-2.5 py-1 rounded-lg shadow-sm border border-rose-100">
-                        오답률 {stats.total > 0 ? 100 - stats.correctRate : 0}%
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 오답 학생 학번 목록 영역 (요구사항 필수 반영) */}
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <h4 className="text-xs font-bold text-slate-700 flex items-center space-x-1">
-                        <UserX className="w-3.5 h-3.5 text-rose-500" />
-                        <span>오답 학생 학번 및 선택 보기</span>
-                      </h4>
-                      <span className="text-[11px] text-slate-400">총 {stats.wrongStudents.length}명</span>
-                    </div>
-
-                    {stats.wrongStudents.length > 0 ? (
-                      <div className="max-h-36 overflow-y-auto p-2.5 bg-rose-50/30 rounded-xl border border-rose-200 flex flex-wrap gap-2">
-                        {stats.wrongStudents.map((st) => (
-                          <div
-                            key={st.id || st.studentId}
-                            className="bg-white border border-rose-300 px-3 py-1.5 rounded-lg text-xs flex items-center space-x-2 shadow-xs"
+                  {responses.filter(r => r.confusingTopic && r.confusingTopic.trim() !== '없음' && r.confusingTopic.trim() !== '').length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {responses
+                        .filter(r => r.confusingTopic && r.confusingTopic.trim() !== '없음' && r.confusingTopic.trim() !== '')
+                        .map((item, idx) => (
+                          <div 
+                            key={item.id || idx} 
+                            className={`p-4 rounded-xl border text-xs flex flex-col justify-between space-y-2 transition-all hover:shadow-xs ${
+                              item.understanding === 'low' 
+                                ? 'bg-rose-50/60 border-rose-200' 
+                                : item.understanding === 'medium'
+                                ? 'bg-amber-50/60 border-amber-200'
+                                : 'bg-slate-50 border-slate-200'
+                            }`}
                           >
-                            <span className="font-bold text-rose-700 font-mono">{st.studentId}</span>
-                            <span className="text-slate-600 font-medium">({st.studentName})</span>
-                            <span className="bg-rose-100 text-rose-800 font-bold px-1.5 py-0.5 rounded text-[10px]">
-                              {st.selectedAnswer}번 선택
-                            </span>
+                            <p className="text-slate-800 font-medium leading-relaxed">
+                              "{item.confusingTopic}"
+                            </p>
+                            <div className="flex items-center justify-between pt-2 border-t border-black/5 text-[11px] text-slate-500">
+                              <span className="font-semibold font-mono">{item.studentId} ({item.studentName})</span>
+                              <span>
+                                {item.understanding === 'high' && '🟢 이해함'}
+                                {item.understanding === 'medium' && '🟡 헷갈림'}
+                                {item.understanding === 'low' && '🔴 모름'}
+                              </span>
+                            </div>
                           </div>
                         ))}
-                      </div>
-                    ) : (
-                      <div className="p-4 bg-emerald-50/50 rounded-xl border border-emerald-200 text-center text-xs text-emerald-800 font-medium">
-                        {stats.total === 0 ? "아직 제출된 응답이 없습니다." : "🎉 모든 학생이 정답을 맞혔습니다!"}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* 문제 내용 미리보기 */}
-                <div className="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500 truncate">
-                  <span className="font-semibold text-slate-700">문제:</span> {quizConfig.question}
-                </div>
-              </div>
-            </div>
-
-            {/* 3. 학생들이 남긴 "가장 헷갈리는 점" 실시간 피드백 보드 */}
-            <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center space-x-2">
-                  <MessageSquare className="w-5 h-5 text-indigo-600" />
-                  <h3 className="font-bold text-slate-900 text-base">학생들이 남긴 헷갈리는 내용 & 질문</h3>
-                </div>
-                <span className="text-xs bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full font-medium">
-                  수업 종료 1분 즉시 피드백용
-                </span>
-              </div>
-
-              {responses.filter(r => r.confusingTopic && r.confusingTopic.trim() !== '없음' && r.confusingTopic.trim() !== '').length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {responses
-                    .filter(r => r.confusingTopic && r.confusingTopic.trim() !== '없음' && r.confusingTopic.trim() !== '')
-                    .map((item, idx) => (
-                      <div 
-                        key={item.id || idx} 
-                        className={`p-4 rounded-xl border text-xs flex flex-col justify-between space-y-2 transition-all hover:shadow-md ${
-                          item.understanding === 'low' 
-                            ? 'bg-rose-50/60 border-rose-200' 
-                            : item.understanding === 'medium'
-                            ? 'bg-amber-50/60 border-amber-200'
-                            : 'bg-slate-50 border-slate-200'
-                        }`}
-                      >
-                        <p className="text-slate-800 font-medium leading-relaxed">
-                          "{item.confusingTopic}"
-                        </p>
-                        <div className="flex items-center justify-between pt-2 border-t border-black/5 text-[11px] text-slate-500">
-                          <span className="font-semibold font-mono">{item.studentId} ({item.studentName})</span>
-                          <span>
-                            {item.understanding === 'high' && '🟢 이해함'}
-                            {item.understanding === 'medium' && '🟡 헷갈림'}
-                            {item.understanding === 'low' && '🔴 모름'}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              ) : (
-                <div className="p-8 text-center text-slate-400 text-xs bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                  아직 등록된 학생 질문이나 헷갈리는 내용이 없습니다.
-                </div>
-              )}
-            </div>
-
-            {/* 4. 전체 학생 응답 상세 리스트 테이블 */}
-            <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-                <h3 className="font-bold text-slate-900 text-base">전체 학생 응답 상세 기록</h3>
-                
-                {/* 필터 탭 */}
-                <div className="flex items-center space-x-1.5 text-xs">
-                  <span className="text-slate-500 font-medium mr-1">이해도 필터:</span>
-                  {[
-                    { key: 'all', label: '전체' },
-                    { key: 'high', label: '🟢 이해' },
-                    { key: 'medium', label: '🟡 헷갈림' },
-                    { key: 'low', label: '🔴 모름' }
-                  ].map((btn) => (
-                    <button
-                      key={btn.key}
-                      onClick={() => setFilterUnderstanding(btn.key)}
-                      className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
-                        filterUnderstanding === btn.key
-                          ? 'bg-indigo-600 text-white'
-                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                      }`}
-                    >
-                      {btn.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {filteredResponses.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-semibold">
-                        <th className="p-3">학번</th>
-                        <th className="p-3">이름</th>
-                        <th className="p-3 text-center">이해도</th>
-                        <th className="p-3 text-center">확인 문제 답안</th>
-                        <th className="p-3 text-center">정답 여부</th>
-                        <th className="p-3">가장 헷갈리는 내용</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {filteredResponses.map((res) => {
-                        const isCorrect = res.selectedAnswer === quizConfig.correctOptionId;
-                        return (
-                          <tr key={res.id || res.studentId} className="hover:bg-slate-50/70 transition-colors">
-                            <td className="p-3 font-mono font-bold text-slate-700">{res.studentId}</td>
-                            <td className="p-3 font-semibold text-slate-800">{res.studentName}</td>
-                            <td className="p-3 text-center">
-                              {res.understanding === 'high' && (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800">
-                                  잘 이해했어요
-                                </span>
-                              )}
-                              {res.understanding === 'medium' && (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800">
-                                  조금 헷갈려요
-                                </span>
-                              )}
-                              {res.understanding === 'low' && (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800">
-                                  잘 모르겠어요
-                                </span>
-                              )}
-                            </td>
-                            <td className="p-3 text-center font-mono font-semibold">
-                              {res.selectedAnswer}번
-                            </td>
-                            <td className="p-3 text-center">
-                              {isCorrect ? (
-                                <span className="inline-flex items-center space-x-0.5 text-emerald-600 font-bold">
-                                  <Check className="w-3.5 h-3.5" />
-                                  <span>정답</span>
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center space-x-0.5 text-rose-600 font-bold">
-                                  <X className="w-3.5 h-3.5" />
-                                  <span>오답</span>
-                                </span>
-                              )}
-                            </td>
-                            <td className="p-3 text-slate-600 max-w-xs truncate">
-                              {res.confusingTopic || <span className="text-slate-300">-</span>}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="p-8 text-center text-slate-400 text-xs bg-slate-50 rounded-xl">
-                  해당 조건의 학생 응답 데이터가 없습니다.
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </main>
-
-      {/* 확인 문제 편집 모달 (교사용) */}
-      {isEditingQuiz && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fadeIn">
-          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-slate-900 flex items-center space-x-2">
-                <Edit3 className="w-5 h-5 text-indigo-600" />
-                <span>오늘의 확인 문제 편집</span>
-              </h3>
-              <button
-                onClick={() => setIsEditingQuiz(false)}
-                className="text-slate-400 hover:text-slate-600 text-xl font-bold p-1"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveQuiz} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">문제 내용</label>
-                <textarea
-                  rows={2}
-                  value={editForm.question}
-                  onChange={(e) => setEditForm({ ...editForm, question: e.target.value })}
-                  required
-                  className="w-full p-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-2">보기 및 정답 설정 (라디오 버튼으로 정답 지정)</label>
-                <div className="space-y-2">
-                  {editForm.options.map((opt, index) => (
-                    <div key={opt.id} className="flex items-center space-x-2">
-                      <input
-                        type="radio"
-                        name="correctOpt"
-                        checked={editForm.correctOptionId === opt.id}
-                        onChange={() => setEditForm({ ...editForm, correctOptionId: opt.id })}
-                        className="w-4 h-4 text-indigo-600 focus:ring-indigo-500"
-                        title="정답으로 선택"
-                      />
-                      <span className="text-xs font-bold text-slate-500 w-5">{opt.id}번</span>
-                      <input
-                        type="text"
-                        value={opt.text}
-                        onChange={(e) => {
-                          const newOpts = [...editForm.options];
-                          newOpts[index].text = e.target.value;
-                          setEditForm({ ...editForm, options: newOpts });
-                        }}
-                        required
-                        className="flex-1 px-3 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                      />
                     </div>
-                  ))}
+                  ) : (
+                    <div className="p-8 text-center text-slate-400 text-xs bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                      아직 등록된 학생 질문이나 헷갈리는 내용이 없습니다.
+                    </div>
+                  )}
+                </div>
+
+                {/* 4. 전체 응답 기록 테이블 */}
+                <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+                    <h3 className="font-bold text-slate-900 text-base">전체 학생 응답 상세 기록</h3>
+                    
+                    {/* 이해도 필터 */}
+                    <div className="flex items-center space-x-1.5 text-xs">
+                      <span className="text-slate-500 font-medium mr-1">필터:</span>
+                      {[
+                        { key: 'all', label: '전체' },
+                        { key: 'high', label: '🟢 이해' },
+                        { key: 'medium', label: '🟡 헷갈림' },
+                        { key: 'low', label: '🔴 모름' }
+                      ].map((btn) => (
+                        <button
+                          key={btn.key}
+                          onClick={() => setFilterUnderstanding(btn.key)}
+                          className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                            filterUnderstanding === btn.key
+                              ? 'bg-indigo-600 text-white'
+                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          {btn.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {filteredResponses.length > 0 ? (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-semibold">
+                            <th className="p-3">학번</th>
+                            <th className="p-3">이름</th>
+                            <th className="p-3 text-center">이해도</th>
+                            <th className="p-3 text-center">선택 답안</th>
+                            <th className="p-3 text-center">정답 여부</th>
+                            <th className="p-3">가장 헷갈리는 내용</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {filteredResponses.map((res) => {
+                            const isCorrect = res.selectedAnswer === quizConfig.correctOptionId;
+                            return (
+                              <tr key={res.id || res.studentId} className="hover:bg-slate-50/70 transition-colors">
+                                <td className="p-3 font-mono font-bold text-slate-700">{res.studentId}</td>
+                                <td className="p-3 font-semibold text-slate-800">{res.studentName}</td>
+                                <td className="p-3 text-center">
+                                  {res.understanding === 'high' && (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800">
+                                      잘 이해했어요
+                                    </span>
+                                  )}
+                                  {res.understanding === 'medium' && (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800">
+                                      조금 헷갈려요
+                                    </span>
+                                  )}
+                                  {res.understanding === 'low' && (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800">
+                                      잘 모르겠어요
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-3 text-center font-mono font-semibold">
+                                  {res.selectedAnswer}번
+                                </td>
+                                <td className="p-3 text-center">
+                                  {isCorrect ? (
+                                    <span className="inline-flex items-center space-x-1 text-emerald-600 font-bold">
+                                      <IconCheck className="w-3.5 h-3.5" />
+                                      <span>정답</span>
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center space-x-1 text-rose-600 font-bold">
+                                      <IconX className="w-3.5 h-3.5" />
+                                      <span>오답</span>
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-3 text-slate-600 max-w-xs truncate">
+                                  {res.confusingTopic || <span className="text-slate-300">-</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="p-8 text-center text-slate-400 text-xs bg-slate-50 rounded-xl">
+                      조건에 맞는 학생 응답이 없습니다.
+                    </div>
+                  )}
                 </div>
               </div>
+            )}
+          </main>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">정답 해설 (선택)</label>
-                <input
-                  type="text"
-                  value={editForm.explanation || ''}
-                  onChange={(e) => setEditForm({ ...editForm, explanation: e.target.value })}
-                  placeholder="예: 양변에서 6을 빼고 2로 나눕니다."
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-              </div>
+          {/* 확인 문제 편집 모달 (교사용) */}
+          {isEditingQuiz && (
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fadeIn">
+              <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center space-x-2">
+                    <IconEdit />
+                    <span>오늘의 확인 문제 편집</span>
+                  </h3>
+                  <button
+                    onClick={() => setIsEditingQuiz(false)}
+                    className="text-slate-400 hover:text-slate-600 text-xl font-bold p-1"
+                  >
+                    ✕
+                  </button>
+                </div>
 
-              <div className="flex justify-end space-x-2 pt-4 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setIsEditingQuiz(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50"
-                >
-                  취소
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-100"
-                >
-                  문제 저장 및 배포
-                </button>
+                <form onSubmit={handleSaveQuiz} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">문제 내용</label>
+                    <textarea
+                      rows={2}
+                      value={editForm.question}
+                      onChange={(e) => setEditForm({ ...editForm, question: e.target.value })}
+                      required
+                      className="w-full p-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm font-medium"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-2">보기 및 정답 설정 (라디오 버튼으로 정답 지정)</label>
+                    <div className="space-y-2">
+                      {editForm.options.map((opt, index) => (
+                        <div key={opt.id} className="flex items-center space-x-2">
+                          <input
+                            type="radio"
+                            name="correctOpt"
+                            checked={editForm.correctOptionId === opt.id}
+                            onChange={() => setEditForm({ ...editForm, correctOptionId: opt.id })}
+                            className="w-4 h-4 text-indigo-600 focus:ring-indigo-500"
+                            title="정답으로 선택"
+                          />
+                          <span className="text-xs font-bold text-slate-500 w-5">{opt.id}번</span>
+                          <input
+                            type="text"
+                            value={opt.text}
+                            onChange={(e) => {
+                              const newOpts = [...editForm.options];
+                              newOpts[index].text = e.target.value;
+                              setEditForm({ ...editForm, options: newOpts });
+                            }}
+                            required
+                            className="flex-1 px-3 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">정답 해설 (선택)</label>
+                    <input
+                      type="text"
+                      value={editForm.explanation || ''}
+                      onChange={(e) => setEditForm({ ...editForm, explanation: e.target.value })}
+                      placeholder="예: 양변에서 6을 빼고 2로 나눕니다."
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  <div className="flex justify-end space-x-2 pt-4 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingQuiz(false)}
+                      className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50"
+                    >
+                      취소
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-100"
+                    >
+                      문제 저장 및 배포
+                    </button>
+                  </div>
+                </form>
               </div>
-            </form>
-          </div>
+            </div>
+          )}
+
+          {/* 하단 푸터 */}
+          <footer className="bg-white border-t border-slate-200 py-3 text-center text-xs text-slate-400">
+            수학 교원 연수 및 실습용 Exit Ticket 시스템 • 수업 종료 3분 전 형성평가 & 피드백
+          </footer>
         </div>
-      )}
+      );
+    }
 
-      {/* 하단 푸터 */}
-      <footer className="bg-white border-t border-slate-200 py-3 text-center text-xs text-slate-400">
-        수학 교원 연수 및 실습용 Exit Ticket 시스템 • 수업 종료 3분 전 형성평가 & 피드백
-      </footer>
-    </div>
-  );
-}
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
